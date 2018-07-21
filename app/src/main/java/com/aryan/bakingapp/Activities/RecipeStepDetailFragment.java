@@ -7,6 +7,8 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.support.v4.app.Fragment;
 import android.support.v4.content.ContextCompat;
+import android.text.TextUtils;
+import android.util.Log;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
@@ -19,6 +21,7 @@ import android.widget.Toast;
 import com.aryan.bakingapp.R;
 import com.aryan.bakingapp.pojo.Recipe;
 import com.aryan.bakingapp.pojo.Step;
+import com.google.android.exoplayer2.C;
 import com.google.android.exoplayer2.DefaultLoadControl;
 import com.google.android.exoplayer2.ExoPlayerFactory;
 import com.google.android.exoplayer2.LoadControl;
@@ -53,6 +56,21 @@ public class RecipeStepDetailFragment extends Fragment  {
     private Handler mainHandler;
     ArrayList<Recipe> recipe;
     String recipeName;
+    String videoURL;
+    private DefaultTrackSelector trackSelector;
+
+    // Saved instance state keys.
+    private static final String KEY_TRACK_SELECTOR_PARAMETERS = "track_selector_parameters";
+    private static final String KEY_WINDOW = "window";
+    private static final String KEY_POSITION = "position";
+    private static final String KEY_AUTO_PLAY = "auto_play";
+
+    private boolean startAutoPlay;
+    private int startWindow;
+    private long startPosition;
+    private boolean mPlayVideoWhenForegrounded;
+    private long mLastPosition;
+    private DefaultTrackSelector.Parameters trackSelectorParameters;
 
     public RecipeStepDetailFragment() {
 
@@ -78,11 +96,16 @@ public class RecipeStepDetailFragment extends Fragment  {
             steps = savedInstanceState.getParcelableArrayList(SELECTED_STEPS);
             selectedIndex = savedInstanceState.getInt(SELECTED_INDEX);
             recipeName = savedInstanceState.getString("Title");
+            startAutoPlay = savedInstanceState.getBoolean(KEY_AUTO_PLAY);
+            startWindow = savedInstanceState.getInt(KEY_WINDOW);
+            startPosition = savedInstanceState.getLong(KEY_POSITION);
+
 
 
         }
         else {
             steps =getArguments().getParcelableArrayList(SELECTED_STEPS);
+
             if (steps!=null) {
                 steps =getArguments().getParcelableArrayList(SELECTED_STEPS);
                 selectedIndex=getArguments().getInt(SELECTED_INDEX);
@@ -92,6 +115,7 @@ public class RecipeStepDetailFragment extends Fragment  {
                 recipe =getArguments().getParcelableArrayList(SELECTED_RECIPES);
                 steps=(ArrayList<Step>)recipe.get(0).getSteps();
                 selectedIndex=0;
+                clearStartPosition();
             }
 
         }
@@ -106,7 +130,7 @@ public class RecipeStepDetailFragment extends Fragment  {
         simpleExoPlayerView = (SimpleExoPlayerView) rootView.findViewById(R.id.playerView);
         simpleExoPlayerView.setResizeMode(AspectRatioFrameLayout.RESIZE_MODE_FIT);
 
-        String videoURL = steps.get(selectedIndex).getVideoURL();
+        videoURL = steps.get(selectedIndex).getVideoURL();
 
         if (rootView.findViewWithTag("sw600dp-port-recipe_step_detail")!=null) {
             recipeName=((RecipeDetailActivity) getActivity()).recipeName;
@@ -123,7 +147,7 @@ public class RecipeStepDetailFragment extends Fragment  {
         if (!videoURL.isEmpty()) {
 
 
-            initializePlayer(Uri.parse(steps.get(selectedIndex).getVideoURL()));
+            initializePlayer();
 
             if (rootView.findViewWithTag("sw600dp-land-recipe_step_detail")!=null) {
                 getActivity().findViewById(R.id.fragment_container2).setLayoutParams(new LinearLayout.LayoutParams(-1,-2));
@@ -179,7 +203,7 @@ public class RecipeStepDetailFragment extends Fragment  {
         return rootView;
     }
 
-    private void initializePlayer(Uri mediaUri) {
+    private void initializePlayer() {
         if (player == null) {
             TrackSelection.Factory videoTrackSelectionFactory = new AdaptiveVideoTrackSelection.Factory(bandwidthMeter);
             DefaultTrackSelector trackSelector = new DefaultTrackSelector(mainHandler, videoTrackSelectionFactory);
@@ -187,11 +211,19 @@ public class RecipeStepDetailFragment extends Fragment  {
 
             player = ExoPlayerFactory.newSimpleInstance(getContext(), trackSelector, loadControl);
             simpleExoPlayerView.setPlayer(player);
+            Uri mediaUri=Uri.parse(steps.get(selectedIndex).getVideoURL());
 
             String userAgent = Util.getUserAgent(getContext(), "Baking App");
             MediaSource mediaSource = new ExtractorMediaSource(mediaUri, new DefaultDataSourceFactory(getContext(), userAgent), new DefaultExtractorsFactory(), null, null);
             player.prepare(mediaSource);
-            player.setPlayWhenReady(true);
+            boolean haveStartPosition = startWindow != C.INDEX_UNSET;
+            if (haveStartPosition) {
+                player.seekTo(startWindow, startPosition);
+            }
+            player.prepare(mediaSource, !haveStartPosition, false);
+            player.setPlayWhenReady(startAutoPlay);
+
+
         }
     }
 
@@ -201,6 +233,14 @@ public class RecipeStepDetailFragment extends Fragment  {
         currentState.putParcelableArrayList(SELECTED_STEPS,steps);
         currentState.putInt(SELECTED_INDEX,selectedIndex);
         currentState.putString("Title",recipeName);
+
+        updateStartPosition();
+        updateTrackSelectorParameters();
+
+        currentState.putBoolean(KEY_AUTO_PLAY, startAutoPlay);
+        currentState.putInt(KEY_WINDOW, startWindow);
+        currentState.putLong(KEY_POSITION, startPosition);
+
     }
 
     public boolean isInLandscapeMode( Context context ) {
@@ -228,22 +268,58 @@ public class RecipeStepDetailFragment extends Fragment  {
     @Override
     public void onPause() {
         super.onPause();
-        if (player!=null) {
-            player.stop();
-            player.release();
+        if (Util.SDK_INT <= 23 || player == null) {
+            initializePlayer();
         }
     }
 
     @Override
     public void onStop() {
         super.onStop();
-        if (player!=null) {
-            player.stop();
-            player.release();
+        if (Util.SDK_INT <= 23) {
+            updateStartPosition();
+            releasePlayer();
+
         }
+    }
+    @Override
+    public void onResume() {
+        super.onResume();
+
+        if (Util.SDK_INT <= 23 || player == null) {
+            initializePlayer();
+        }
+
+
+    }
+
+    private void updateStartPosition() {
+        if (player != null) {
+            startAutoPlay = player.getPlayWhenReady();
+            startWindow = player.getCurrentWindowIndex();
+            startPosition = Math.max(0, player.getCurrentPosition());
+        }
+    }
+    private void updateTrackSelectorParameters() {
+        if (trackSelector != null) {
+            trackSelectorParameters = trackSelector.getParameters();
+        }
+    }
+    private void releasePlayer() {
+        if (player != null) {
+            updateTrackSelectorParameters();
+            updateStartPosition();
+            player.release();
+            player = null;
+            trackSelector = null;
+        }
+
+    }
+    private void clearStartPosition() {
+        startAutoPlay = true;
+        startWindow = C.INDEX_UNSET;
+        startPosition = C.TIME_UNSET;
     }
 
 
-
 }
-
